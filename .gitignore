@@ -1,0 +1,13 @@
+# Local/private training artifacts.
+.venv/
+__pycache__/
+cache/
+runs/
+manifests/*.jsonl
+manifests/*/
+*.pt
+*.safetensors
+*.log
+
+._*
+.DS_Store

@@ -1,0 +1,9 @@
+# Python 3.11 + CUDA 12.8 environment; installed by install_env.sh.
+torch>=2.8
+diffusers @ git+https://github.com/huggingface/diffusers.git@abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc
+transformers>=4.56
+accelerate>=1.10
+deepspeed>=0.18
+peft>=0.18
+av>=12
+safetensors>=0.4

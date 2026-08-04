@@ -1,13 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ENV_PREFIX="${H3_ENV_PREFIX:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.venv}"
-PYTHON="${ENV_PREFIX}/bin/python"
-if [[ ! -x "$PYTHON" ]]; then
-  echo "Missing H3 environment: $ENV_PREFIX" >&2
-  echo "Create it with: conda create -p $ENV_PREFIX python=3.11 -y" >&2
-  exit 2
-fi
+
+PYTHON="python"
 
 "$PYTHON" - <<'PY'
 import torch

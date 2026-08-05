@@ -17,8 +17,13 @@ are verified against that commit's source/docs:
 Memory: the plain path here loads every component in bf16 — the 33B
 transformer (~63 GB), the Qwen3-VL-32B text encoder (~63 GB) and the VAEs
 (~10 GB): ~135 GB of weights alone, so even a 90 GB card OOMs (verified).
-Generation needs the diffusers int8 / offload / device_map recipes, e.g.
-two 80 GB cards via device_map.
+`--offload` (default) is the official single-card recipe for this commit:
+components are registered with a ComponentsManager that moves them on and
+off the accelerator on demand, so the weights live in host RAM (~135 GB)
+and one GPU only ever holds the active component. Attention is still full
+self-attention over the packed sequence — without a flash backend
+(`--attention-backend _flash_3_hub`, Hopper only) keep the canvas small,
+or the per-head score matrix itself OOMs.
 """
 from __future__ import annotations
 
@@ -30,7 +35,7 @@ from pathlib import Path
 import torch
 from PIL import Image
 
-from diffusers import MiniMaxH3ModularPipeline, MiniMaxH3Ref2VABlocks
+from diffusers import ComponentsManager, MiniMaxH3ModularPipeline, MiniMaxH3Ref2VABlocks
 from diffusers.modular_pipelines.minimax_h3 import MiniMaxH3Reference
 from diffusers.modular_pipelines.minimax_h3.packing import align_num_frames
 from diffusers.utils import encode_video
@@ -70,15 +75,48 @@ def _resolve_model_root(model: Path) -> Path:
     return local_root
 
 
-def build_pipe(model: Path, task: str):
+def _ensure_processor_compat(pipe) -> None:
+    """Restore Qwen3VLProcessor.create_mm_token_type_ids, dropped in transformers 5.0.0.
+
+    The pinned diffusers encoders call it to tag text/image/video runs for the
+    Qwen3-VL 3D-rotary positions. In 5.0.0 the model re-derives that layout from
+    the vision pad token ids in input_ids instead (the tensor lands in **kwargs
+    and is ignored), so any consistent tensor would do — keep the old 0/1/2
+    semantics anyway.
+    """
+    proc = getattr(pipe, "processor", None)
+    if proc is None or hasattr(proc, "create_mm_token_type_ids"):
+        return
+    image_pad = proc.tokenizer.convert_tokens_to_ids("<|image_pad|>")
+    video_pad = proc.tokenizer.convert_tokens_to_ids("<|video_pad|>")
+
+    def create_mm_token_type_ids(sequences):
+        return [[1 if t == image_pad else 2 if t == video_pad else 0 for t in seq] for seq in sequences]
+
+    proc.create_mm_token_type_ids = create_mm_token_type_ids
+    print("processor compat: Qwen3VLProcessor.create_mm_token_type_ids restored "
+          "(transformers 5.0.0 dropped it)")
+
+
+def build_pipe(model: Path, task: str, offload: bool = True,
+               reserve_margin: str = "12GB", attention_backend: str | None = None):
     model = _resolve_model_root(model)
+    manager = ComponentsManager() if offload else None
+    kwargs = {"components_manager": manager} if offload else {}
     if task == "ref2va":
         # Ref2VA registers the transformer as `transformer_ref`.
-        pipe = MiniMaxH3Ref2VABlocks().init_pipeline(str(model))
+        pipe = MiniMaxH3Ref2VABlocks().init_pipeline(str(model), **kwargs)
     else:
-        pipe = MiniMaxH3ModularPipeline.from_pretrained(str(model))
+        pipe = MiniMaxH3ModularPipeline.from_pretrained(str(model), **kwargs)
     pipe.load_components(dtype=torch.bfloat16)
-    pipe.to("cuda")
+    _ensure_processor_compat(pipe)
+    if offload:
+        manager.enable_auto_cpu_offload(device="cuda", memory_reserve_margin=reserve_margin)
+    else:
+        pipe.to("cuda")
+    if attention_backend:
+        transformer = getattr(pipe, "transformer_ref", None) or getattr(pipe, "transformer", None)
+        transformer.set_attention_backend(attention_backend)
     return pipe
 
 
@@ -108,10 +146,18 @@ def main() -> None:
     ap.add_argument("--last-image", type=Path, help="fl2va_last_frame: last-frame keyframe")
     ap.add_argument("--reference", action="append", metavar="TYPE=PATH",
                     help="ref2va: repeatable, e.g. image=a.jpg video=b.mp4 audio=c.wav (max 9i/3v/3a)")
-    ap.add_argument("--num-frames", type=int, default=124, help="snapped up to 17*n+5; duration must stay 5-15 s")
-    ap.add_argument("--height", type=int, default=768)
-    ap.add_argument("--width", type=int, default=768)
+    ap.add_argument("--num-frames", type=int, default=120, help="snapped up to 17*n+5; duration must stay 5-15 s")
+    ap.add_argument("--height", type=int, default=640)
+    ap.add_argument("--width", type=int, default=480)
     ap.add_argument("--steps", type=int, default=50)
+    ap.add_argument("--offload", dest="offload", action="store_true", default=True,
+                    help="auto CPU offload via ComponentsManager (default; ~135 GB of weights live in host RAM)")
+    ap.add_argument("--no-offload", dest="offload", action="store_false",
+                    help="load everything onto CUDA (needs ~135 GB free VRAM)")
+    ap.add_argument("--reserve-margin", default="12GB",
+                    help="VRAM the offload manager keeps free (default 12GB)")
+    ap.add_argument("--attention-backend", default=None,
+                    help="e.g. _flash_3_hub (Hopper only, ~3x faster); default is torch SDPA")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--output-type", choices=("pil", "pt", "np", "latent"), default="pil")
     ap.add_argument("--output", type=Path, default=Path("runs/infer.mp4"))
@@ -124,7 +170,20 @@ def main() -> None:
     if not 5 * 24 <= num_frames <= 15 * 24:
         print(f"warning: {num_frames} frames at 24 fps is outside 5-15 s", file=sys.stderr)
 
-    pipe = build_pipe(args.model, args.task)
+    if args.attention_backend is None:
+        # Full self-attention over the packed sequence; torch SDPA without a
+        # flash kernel materializes the per-head score matrix (≈ tokens² × 2 B).
+        tokens = (args.height // 16) * (args.width // 16) * num_frames + 4096
+        score_gb = tokens * tokens * 2 / 1e9
+        if score_gb > 4:
+            print(f"warning: ~{score_gb:.0f} GB of per-head attention scores at this canvas "
+                  f"({tokens} packed tokens) without a flash backend; if it OOMs, shrink "
+                  "--height/--width (e.g. 256-384) or use --attention-backend _flash_3_hub on Hopper",
+                  file=sys.stderr)
+
+    pipe = build_pipe(args.model, args.task, offload=args.offload,
+                      reserve_margin=args.reserve_margin,
+                      attention_backend=args.attention_backend)
     if args.checkpoint:
         apply_checkpoint(pipe, args.checkpoint, args.task)
 

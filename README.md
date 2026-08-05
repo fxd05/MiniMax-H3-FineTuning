@@ -116,6 +116,12 @@ python infer.py --model /path/to/MiniMax-H3 --task ref2va \
 
 Notes:
 
+- Memory: `--offload` is on by default — components are managed by a `ComponentsManager` and moved on/off
+  the GPU on demand, so the ~135 GB of weights live in host RAM and one 80–96 GB card suffices. Pass
+  `--no-offload` (needs ~135 GB free VRAM) or tune `--reserve-margin`. Generation still runs full
+  self-attention over the packed sequence: without `--attention-backend _flash_3_hub` (Hopper only) the
+  default 768×768×124 canvas materializes per-head score matrices far beyond one card, so shrink
+  `--height`/`--width` (e.g. 256–384) on non-Hopper hardware.
 - `ref2va` takes repeatable `--reference TYPE=PATH` with `TYPE` in `image|video|audio` (up to 9 images, 3
   videos, 3 audio); the other tasks take a single keyframe via `--image` / `--last-image`.
 - `--num-frames` (default 124) snaps up to `17n+5` and must stay within 5–15 s at 24 fps;
@@ -123,6 +129,9 @@ Notes:
   the checkpoint is guidance-distilled.
 - `--checkpoint` patches a `heads`-mode checkpoint (`proj_out` + `audio_proj_out`) with
   `load_state_dict(..., strict=False)`; LoRA checkpoints need PEFT `load_adapter` instead.
+- transformers 5.0.0 dropped `Qwen3VLProcessor.create_mm_token_type_ids`, which the pinned diffusers
+  encoders call; `infer.py` restores it as a tiny shim (the 5.0.0 model re-derives the modality layout
+  from the pad token ids itself, so the tensor is only kept for API fidelity).
 - Output is a 24 fps mp4 with synchronized audio muxed in (default `runs/infer.mp4`).
 
 ## Does it work?

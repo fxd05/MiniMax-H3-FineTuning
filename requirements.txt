@@ -1,9 +1,19 @@
 # Python 3.11 + CUDA 12.8 environment; installed by install_env.sh.
 torch>=2.8
 diffusers @ git+https://github.com/huggingface/diffusers.git@abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc
-transformers>=4.56
+# diffusers@abc5e9bf imports huggingface_hub.get_cached_repo_tree, which only
+# exists in hub >= 1.0 (the 0.37-0.99 range is absent from the cluster mirror),
+# and its metadata requires hub>=1.23. The diffusers install is --no-deps, so
+# this must be installed explicitly.
+huggingface-hub>=1.23.0,<2
+# transformers 4.57.x hard-requires huggingface-hub<1.0 at import time — an
+# empty intersection with the hub pin above. 5.0.0 allows hub<2.0 and keeps
+# Qwen3-VL, which the H3 text encoder needs.
+transformers>=5.0.0
 accelerate>=1.10
 deepspeed>=0.18
-peft>=0.18
+# peft 0.17 imports transformers.HybridCache, removed in transformers 5.0;
+# 0.20.0 is the first version verified against the 5.0.0 + hub 1.26 combo.
+peft>=0.20
 av>=12
 safetensors>=0.4

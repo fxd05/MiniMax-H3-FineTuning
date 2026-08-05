@@ -8,7 +8,7 @@ A minimal supervised fine-tuning path for [MiniMaxAI/MiniMax-H3](https://hugging
 
 ## Environment
 
-- Python 3.11 venv at `.venv` (created with `conda create -p .venv python=3.11 -y`), torch >= 2.8. `install_env.sh` verifies the env and installs two **pinned git revisions** — the H3 classes (`MiniMaxH3Transformer3DModel`, `AutoencoderKLMiniMaxH3`, `diffusers.modular_pipelines.minimax_h3.packing`) are NOT in a released diffusers wheel, and transformers is pinned to v4.57.3 for Qwen3-VL. `requirements.txt` pins the same diffusers commit (`abc5e9bf…`); keep the two in sync when bumping.
+- Python 3.11 venv at `.venv` (created with `conda create -p .venv python=3.11 -y`), torch >= 2.8. `install_env.sh` verifies the env and installs the pinned revisions — the H3 classes (`MiniMaxH3Transformer3DModel`, `AutoencoderKLMiniMaxH3`, `diffusers.modular_pipelines.minimax_h3.packing`) are NOT in a released diffusers wheel, so diffusers is pinned to the git commit `abc5e9bf…`. That commit imports `huggingface_hub.get_cached_repo_tree`, which only exists in hub >= 1.0 (and its metadata requires `>=1.23`), hence the explicit `huggingface-hub>=1.23,<2` pin — the diffusers install is `--no-deps` so hub is never pulled in otherwise. transformers is pinned to v5.0.0: 4.57.x hard-requires hub<1.0 at import time (empty intersection with the hub pin), and Qwen3-VL — needed by the H3 text encoder — survives in 5.0.0. peft must be >= 0.20 (0.17 imports `HybridCache`, removed in transformers 5). `requirements.txt` mirrors the same pins; keep the two in sync when bumping.
 - Point at a downloaded model checkout with `--model /path/to/MiniMax-H3` (subfolders `transformer` / `transformer_ref` / `vae` / `text_encoder` / `tokenizer` / `processor`).
 
 ## Standard workflow

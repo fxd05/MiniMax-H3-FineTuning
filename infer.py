@@ -21,6 +21,7 @@ recipes on smaller cards.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -33,7 +34,42 @@ from diffusers.modular_pipelines.minimax_h3.packing import align_num_frames
 from diffusers.utils import encode_video
 
 
+def _resolve_model_root(model: Path) -> Path:
+    """Return a model root whose modular_model_index.json points at local paths.
+
+    The modular index shipped with the checkpoint declares every component with
+    pretrained_model_name_or_path="MiniMaxAI/MiniMax-H3" (the hub id), so
+    from_pretrained(local_dir) still tries to download from the hub. That works
+    on machines with a warm HF cache, but on this cluster the checkout lives in
+    read-only /lpai with no cache, and hub access goes through a mirror that
+    ices Xet downloads (404 on xet-read-token). Rewrite the index to absolute
+    local paths in a writable mirror dir (runs/, gitignored) and use that as
+    the root; weight shards are still read from the original subfolders.
+    """
+    idx = model / "modular_model_index.json"
+    if not idx.exists():
+        return model
+    data = json.loads(idx.read_text())
+    changed = False
+    for entry in data.values():
+        # component entries are [source, class, {spec, ...}]
+        if not (isinstance(entry, list) and len(entry) == 3 and isinstance(entry[2], dict)):
+            continue
+        spec = entry[2]
+        if spec.get("pretrained_model_name_or_path") not in (None, str(model)):
+            spec["pretrained_model_name_or_path"] = str(model)
+            changed = True
+    if not changed:
+        return model
+    local_root = Path(__file__).resolve().parent / "runs" / "_local_model_index"
+    local_root.mkdir(parents=True, exist_ok=True)
+    (local_root / "modular_model_index.json").write_text(json.dumps(data, indent=2))
+    print(f"localized modular index: {local_root} -> {model}")
+    return local_root
+
+
 def build_pipe(model: Path, task: str):
+    model = _resolve_model_root(model)
     if task == "ref2va":
         # Ref2VA registers the transformer as `transformer_ref`.
         pipe = MiniMaxH3Ref2VABlocks().init_pipeline(str(model))

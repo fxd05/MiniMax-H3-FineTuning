@@ -75,6 +75,53 @@ python -m torch.distributed.run --nproc_per_node 8 train.py \
 来自模型本身的约束:`num_frames % 17 == 5`、宽高均为 32 的倍数、视频 24 fps、音频 32 kHz 立体声、
 `audio_latent_frames = round(num_frames / 24 * 40)`。
 
+## 推理
+
+本仓库不含去噪器——生成走官方 diffusers modular pipeline(`install_env.sh` 固定的那个 commit,
+与 `train.py` 基于的是同一版本)。`infer.py` 覆盖 H3 的全部四个任务。
+
+**显存实测提醒:** 默认路径把所有组件以 bf16 加载——33B Omni-Transformer(约 63 GB)+
+Qwen3-VL-32B 文本编码器(约 63 GB)+ VisualVAE(约 10 GB)+ AudioVAE(约 0.6 GB),
+**权重合计约 135 GB**,还没算 latent 与全注意力激活,90 GB 的卡也放不下。生成需用 diffusers
+文档中的 int8 / `device_map` / offload 方案(例如量化两个大模型,或用 `device_map` 摊到两张
+80 GB 卡上)。
+
+```bash
+# t2va —— 文生视频 + 音频
+CUDA_VISIBLE_DEVICES=0 python infer.py --model /path/to/MiniMax-H3 --task t2va \
+  --prompt "A tiger walks through a snowy forest." --output runs/tiger.mp4
+
+# fl2va —— 首帧关键帧条件生成
+CUDA_VISIBLE_DEVICES=0 python infer.py --model /path/to/MiniMax-H3 --task fl2va \
+  --image examples/public_assets/amur_tiger.jpg \
+  --prompt "The tiger wakes up and looks around." --output runs/fl2va.mp4
+
+# fl2va_last_frame —— 末帧关键帧条件生成
+CUDA_VISIBLE_DEVICES=0 python infer.py --model /path/to/MiniMax-H3 --task fl2va_last_frame \
+  --last-image examples/public_assets/amur_tiger.jpg \
+  --prompt "The tiger walks away into the forest." --output runs/fl2va_last.mp4
+
+# ref2va —— 参考图/视频/音频(经 MiniMaxH3Ref2VABlocks 加载);
+#            可选地把训练好的 heads checkpoint patch 回 transformer
+python infer.py --model /path/to/MiniMax-H3 --task ref2va \
+  --reference image=examples/public_assets/amur_tiger.jpg \
+  --reference image=examples/public_assets/flock_of_sheep.jpg \
+  --prompt "<Picture 1>中的老虎扑向<Picture 2>中的羊" \
+  --checkpoint runs/heads_1000/checkpoint-1000.pt \
+  --output runs/tiger_ft.mp4
+```
+
+说明:
+
+- `ref2va` 支持重复的 `--reference TYPE=PATH`,`TYPE` 为 `image|video|audio`(最多 9 张图、3 段视频、
+  3 段音频);其余任务各取一张关键帧,用 `--image` / `--last-image`。
+- `--num-frames`(默认 124)会上取整到 `17n+5`,且 24 fps 下时长必须落在 5–15 s 内;
+  `--height` / `--width`(默认 768)必须是 32 的倍数。没有 `--guidance-scale` / 负向提示词——
+  权重是 guidance 蒸馏的。
+- `--checkpoint` 用 `load_state_dict(..., strict=False)` 把 `heads` 模式的 checkpoint
+  (`proj_out` + `audio_proj_out`)patch 进 transformer;LoRA checkpoint 需改用 PEFT `load_adapter`。
+- 输出为 24 fps 的 mp4,内混同步音频(默认 `runs/infer.mp4`)。
+
 ## 效果验证
 
 数值约定搞错时(timestep 方向 + 速度符号同时反),heads 模式的 loss **越训越高**(10 步内

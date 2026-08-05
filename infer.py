@@ -14,9 +14,11 @@ are verified against that commit's source/docs:
 - Output is a state object: state.get("videos")[0] (video frames),
   state.get("audio")[0] (shape (1, 2, num_samples)), state.get("sampling_rate").
 
-Memory: the 33B transformer is ~66 GB in bf16 — one 80 GB GPU for the
-plain path here; see the diffusers docs for int8 / offload / device_map
-recipes on smaller cards.
+Memory: the plain path here loads every component in bf16 — the 33B
+transformer (~63 GB), the Qwen3-VL-32B text encoder (~63 GB) and the VAEs
+(~10 GB): ~135 GB of weights alone, so even a 90 GB card OOMs (verified).
+Generation needs the diffusers int8 / offload / device_map recipes, e.g.
+two 80 GB cards via device_map.
 """
 from __future__ import annotations
 

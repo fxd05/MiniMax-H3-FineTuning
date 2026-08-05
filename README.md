@@ -78,6 +78,53 @@ python -m torch.distributed.run --nproc_per_node 8 train.py \
 Constraints inherited from the model: `num_frames % 17 == 5`, height/width divisible by 32, 24 fps video,
 32 kHz stereo audio, `audio_latent_frames = round(num_frames / 24 * 40)`.
 
+## Inference
+
+This repo has no denoiser — generation goes through the official diffusers modular pipeline pinned by
+`install_env.sh` (the same commit `train.py` is built against). `infer.py` covers all four H3 tasks.
+
+**Memory reality check (measured from the checkpoint):** the plain path loads every component in bf16 —
+the 33B Omni-Transformer (~63 GB), the Qwen3-VL-32B text encoder (~63 GB), the VisualVAE (~10 GB) and the
+AudioVAE (~0.6 GB) — ≈ 135 GB of weights alone, before latents and full-attention activations. Even a
+90 GB card does not fit that. Generation needs the int8 / `device_map` / offload recipes from the diffusers
+docs (e.g. quantize the two big models, or spread `device_map` across two 80 GB cards).
+
+```bash
+# t2va — text-to-video + audio
+CUDA_VISIBLE_DEVICES=0 python infer.py --model /path/to/MiniMax-H3 --task t2va \
+  --prompt "A tiger walks through a snowy forest." --output runs/tiger.mp4
+
+# fl2va — first-frame keyframe conditioning
+CUDA_VISIBLE_DEVICES=0 python infer.py --model /path/to/MiniMax-H3 --task fl2va \
+  --image examples/public_assets/amur_tiger.jpg \
+  --prompt "The tiger wakes up and looks around." --output runs/fl2va.mp4
+
+# fl2va_last_frame — last-frame keyframe conditioning
+CUDA_VISIBLE_DEVICES=0 python infer.py --model /path/to/MiniMax-H3 --task fl2va_last_frame \
+  --last-image examples/public_assets/amur_tiger.jpg \
+  --prompt "The tiger walks away into the forest." --output runs/fl2va_last.mp4
+
+# ref2va — reference images/videos/audio (loaded via MiniMaxH3Ref2VABlocks);
+#           optionally patch a trained heads checkpoint into the transformer
+python infer.py --model /path/to/MiniMax-H3 --task ref2va \
+  --reference image=examples/public_assets/amur_tiger.jpg \
+  --reference image=examples/public_assets/flock_of_sheep.jpg \
+  --prompt "<Picture 1>中的老虎扑向<Picture 2>中的羊" \
+  --checkpoint runs/heads_1000/checkpoint-1000.pt \
+  --output runs/tiger_ft.mp4
+```
+
+Notes:
+
+- `ref2va` takes repeatable `--reference TYPE=PATH` with `TYPE` in `image|video|audio` (up to 9 images, 3
+  videos, 3 audio); the other tasks take a single keyframe via `--image` / `--last-image`.
+- `--num-frames` (default 124) snaps up to `17n+5` and must stay within 5–15 s at 24 fps;
+  `--height` / `--width` (default 768) must be multiples of 32. No `--guidance-scale` / negative prompt —
+  the checkpoint is guidance-distilled.
+- `--checkpoint` patches a `heads`-mode checkpoint (`proj_out` + `audio_proj_out`) with
+  `load_state_dict(..., strict=False)`; LoRA checkpoints need PEFT `load_adapter` instead.
+- Output is a 24 fps mp4 with synchronized audio muxed in (default `runs/infer.mp4`).
+
 ## Does it work?
 
 With the conventions wrong (timestep direction + velocity sign inverted), a heads-only run shows loss
